@@ -119,6 +119,7 @@ var STOP_START = 44;      // 5件 x (記号,数量,単価)
 
 // 売上データシート（CSV取込）側の列（0始まり、CSVの列順と対応させること）
 var IMPORT_COL_REPORT_DATE = 0;    // 日報入力確定年月日（例: "20261014"）
+var IMPORT_COL_SCHEDULED_DATE = 1; // 本来納品予定年月日（空白の場合あり）
 var IMPORT_COL_STAFF_NAME = 2;     // 担当者名
 var IMPORT_COL_RESULT_CODE = 6;    // 伝票納品結果種別
 var IMPORT_COL_QTY_PLANNED = 7;    // 納品予定数量
@@ -253,14 +254,23 @@ function updateSalesSummary() {
     var actualAmount = (Number(row[IMPORT_COL_QTY_ACTUAL]) || 0) * (Number(row[IMPORT_COL_PRICE_ACTUAL]) || 0);
     var resultCode = String(row[IMPORT_COL_RESULT_CODE]).trim();
 
+    // 💡 予定売上の対象は「本来納品予定年月日」が空白でなく、かつ日報入力確定年月日以降
+    //    （同日含む）の行だけに限定する。本来納品予定年月日が日報確定日より前＝
+    //    過去から持ち越された予定（今回の集計期間の予定ではない）、空白＝そもそも
+    //    事前の予定が無かった取引のため、どちらも「予定売上」には含めない。
+    //    どちらも日付は "YYYYMMDD" の8桁文字列なので、文字列比較でそのまま前後判定できる。
+    var scheduledDateStr = String(row[IMPORT_COL_SCHEDULED_DATE]).trim();
+    var reportDateStr = String(row[IMPORT_COL_REPORT_DATE]).trim();
+    var includeInPlanned = !!scheduledDateStr && scheduledDateStr >= reportDateStr;
+
     var mb = getBucket_(byStaffMonth, staffName + "|" + parsed.month);
-    mb.plannedAmount += plannedAmount;
+    if (includeInPlanned) mb.plannedAmount += plannedAmount;
     mb.actualAmount += actualAmount;
     if (resultCode !== "2") mb.stopAmountCsv += (plannedAmount - actualAmount);
 
     if (branch) {
       var db = getBucket_(byBranchDay, branch + "|" + parsed.day);
-      db.plannedAmount += plannedAmount;
+      if (includeInPlanned) db.plannedAmount += plannedAmount;
       db.actualAmount += actualAmount;
       if (resultCode !== "2") db.stopAmountCsv += (plannedAmount - actualAmount);
     }
