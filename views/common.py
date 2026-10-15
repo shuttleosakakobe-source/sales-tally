@@ -16,8 +16,7 @@ BRANCH_CUSTOMER_CSV = {
     "大阪北店": "https://docs.google.com/spreadsheets/d/1AkMb1J2m3VZAIyMCKmr3T3E8-kJB0BDDdWQJuEn7YGc/gviz/tq?tqx=out:csv&gid=734014298",
 }
 
-# 💡【要設定】GAS Webアプリをデプロイしたあと、発行されたURL（.../exec）に書き換えてください。
-GAS_URL = "★★ここに売上集計用GAS WebアプリのURLを貼り付けてください（例: https://script.google.com/macros/s/XXXXXXXX/exec）★★"
+GAS_URL = "https://script.google.com/macros/s/AKfycbwxaQN_jmci7X-kdeNDkMUHcJGTP_04GcQN1s45f2lE6jrkrRm_bS1Qpp-KjPv-cl4TfA/exec"
 
 # 売上集計データ（セリング・増加・今スト申請、集計表、ランキング表を1つのスプレッドシートにまとめる）
 SALES_SPREADSHEET_ID = "1XXQyXibs_beJ3HmrEJIrqq8pAkG0xAeSH_aiRnFn9cA"

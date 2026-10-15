@@ -98,8 +98,8 @@ Streamlit Community Cloud等にデプロイする場合は、このリポジト�
 
 ## 5. 動作確認チェックリスト
 
-- [ ] GAS Webアプリを新規デプロイし、`.../exec` URLを取得した
-- [ ] `views/common.py` の `GAS_URL` を実URLに書き換えた
+- [x] GAS Webアプリを新規デプロイし、`.../exec` URLを取得した
+- [x] `views/common.py` の `GAS_URL` を実URLに書き換えた
 - [ ] `createSalesSummaryTrigger` を実行し、1時間ごとの自動更新を有効にした
 - [ ] アプリを起動し、ログイン画面が表示されることを確認した
 - [ ] 既存アカウント（kensaku・campaign-tallyと共通）でログインできることを確認した
