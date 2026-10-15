@@ -319,7 +319,7 @@ function writeMonthlySummary_(sheet, byStaffMonth, staffBranch) {
     var b = byStaffMonth[key];
     var branch = staffBranch[name] || "";
     var plannedAdjusted = b.plannedAmount - b.stopManualAmount;
-    var stopAdjusted = b.stopAmountCsv - b.stopManualAmount;
+    var stopAdjusted = Math.max(0, b.stopAmountCsv - b.stopManualAmount);
     return [month, name, branch, plannedAdjusted, b.sellingAmount, b.increaseAmount, stopAdjusted, b.actualAmount];
   });
   rows.sort(function (a, b) {
@@ -341,7 +341,7 @@ function writeDailySummary_(sheet, byBranchDay) {
     var branch = parts[0], day = parts[1];
     var b = byBranchDay[key];
     var plannedAdjusted = b.plannedAmount - b.stopManualAmount;
-    var stopAdjusted = b.stopAmountCsv - b.stopManualAmount;
+    var stopAdjusted = Math.max(0, b.stopAmountCsv - b.stopManualAmount);
     return [day, branch, plannedAdjusted, b.sellingAmount, b.increaseAmount, stopAdjusted, b.actualAmount];
   });
   rows.sort(function (a, b) {
