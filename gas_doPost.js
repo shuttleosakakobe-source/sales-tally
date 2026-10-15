@@ -225,8 +225,10 @@ function computeCampaignTallyAmount_(row, category) {
 
 // キャンペーン開催期間中（CAMPAIGN_ACTIVE_UNTIL以前）の、campaign-tally側の
 // 承認済みセリング・増加データを、sales-tallyの月次集計・日次集計バケットに加算する。
-// campaign-tallyのスプレッドシートを開けなかった場合は、集計全体を止めずに
-// スキップする（CAMPAIGN_TALLY_SHEET_URLの設定ミスやアクセス権限が無い場合など）。
+// 戻り値は { ok: bool, message: string, matchedRows: number }。
+// campaign-tallyのスプレッドシートを開けなかった場合は、集計全体は止めずにスキップし、
+// 理由をmessageに入れて呼び出し元（updateSalesSummary）の完了アラートに表示させる
+// （黙ってスキップすると「反映されていない」ことに誰も気づけないため）。
 function addCampaignTallyTotals_(byStaffMonth, byBranchDay, staffBranch) {
   var ctSheet;
   try {
@@ -239,8 +241,7 @@ function addCampaignTallyTotals_(byStaffMonth, byBranchDay, staffBranch) {
     }
     if (!ctSheet) ctSheet = ctSs.getSheets()[0];
   } catch (e) {
-    Logger.log("campaign-tallyのスプレッドシートを開けませんでした: " + e.toString());
-    return;
+    return { ok: false, message: "campaign-tallyのスプレッドシートを開けませんでした: " + e.toString(), matchedRows: 0 };
   }
 
   function getBucket_(map, key) {
@@ -249,8 +250,11 @@ function addCampaignTallyTotals_(byStaffMonth, byBranchDay, staffBranch) {
   }
 
   var ctRows = ctSheet.getDataRange().getValues().slice(1);
+  var matchedRows = 0;
+  var approvedCount = 0;
   ctRows.forEach(function (row) {
     if (String(row[CT_COL_STATUS]).trim() !== "承認済み") return;
+    approvedCount++;
     var category = String(row[CT_COL_CATEGORY]).trim();
     if (category !== "きれいBOX" && category !== "セリング" && category !== "増加・切替") return;
 
@@ -262,6 +266,7 @@ function addCampaignTallyTotals_(byStaffMonth, byBranchDay, staffBranch) {
     if (!staffName) return;
     var branch = String(row[CT_COL_BRANCH]).trim() || staffBranch[staffName] || "";
     var amount = computeCampaignTallyAmount_(row, category);
+    matchedRows++;
 
     var mb = getBucket_(byStaffMonth, staffName + "|" + parsed.month);
     var db = branch ? getBucket_(byBranchDay, branch + "|" + parsed.day) : null;
@@ -275,6 +280,13 @@ function addCampaignTallyTotals_(byStaffMonth, byBranchDay, staffBranch) {
       if (db) db.increaseAmount += amount;
     }
   });
+
+  return {
+    ok: true,
+    matchedRows: matchedRows,
+    message: "campaign-tally: 承認済み" + approvedCount + "件中、キャンペーン期間内（〜" +
+      CAMPAIGN_ACTIVE_UNTIL + "）のセリング／きれいBOX／増加" + matchedRows + "件を集計に反映しました。",
+  };
 }
 
 // "20261014" -> {month: "2026/10", day: "2026/10/14"}（CSVの日報確定年月日用）
@@ -418,12 +430,14 @@ function updateSalesSummary() {
   });
 
   // --- キャンペーン開催期間中のセリング・増加は、campaign-tally側の承認済みデータから集計 ---
-  addCampaignTallyTotals_(byStaffMonth, byBranchDay, staffBranch);
+  var ctResult = addCampaignTallyTotals_(byStaffMonth, byBranchDay, staffBranch);
 
   writeMonthlySummary_(monthlySheet, byStaffMonth, staffBranch);
   writeDailySummary_(dailySheet, byBranchDay);
 
-  if (ui) ui.alert("集計表を更新しました（" + new Date().toLocaleString() + "）");
+  var doneMsg = "集計表を更新しました（" + new Date().toLocaleString() + "）\n\n" + ctResult.message;
+  if (ui) ui.alert(doneMsg);
+  Logger.log(doneMsg);
 }
 
 // 月次集計シート（2行目以降）を、担当者×年月の組み合わせごとに1行で丸ごと書き直す。
