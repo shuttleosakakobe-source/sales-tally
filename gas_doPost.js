@@ -102,6 +102,26 @@ var STAFF_MASTER_SHEET_NAME = "担当者マスタ";
 var MONTHLY_SHEET_NAME = "月次集計";
 var DAILY_SHEET_NAME = "日次集計";
 
+// 💡 キャンペーン集計アプリ（campaign-tally）との連携。
+//    キャンペーン開催期間中（CAMPAIGN_ACTIVE_UNTIL以前の日付）は、セリング・上乗せ
+//    （増加）の実績はcampaign-tally側で申請・承認されるため、売上集計アプリ
+//    （sales-tally）自身のセリング・増加申請は集計に含めず、campaign-tally側の
+//    承認済みデータから集計する（二重カウント防止）。キャンペーン終了後
+//    （CAMPAIGN_ACTIVE_UNTILより後の日付）は、通常どおりsales-tally自身の
+//    申請データを集計に使う。理由あり今ストはこの対象外（常にsales-tally自身のデータ）。
+//    日付は "YYYY/MM/DD" 形式の文字列同士で比較する（タイムスタンプ・日報日付と同じ形式）。
+var CAMPAIGN_TALLY_SHEET_URL = "https://docs.google.com/spreadsheets/d/1P_T6ZylVbu9FBK5HureFFMPz4wTujJOfB1FUgI8gaO4/edit?gid=0#gid=0";
+var CAMPAIGN_ACTIVE_UNTIL = "2026/12/28"; // 変更する場合はこの日付だけ書き換えればよい
+
+// campaign-tally側（集計用シート）の列（0始まり、campaign-tallyのgas_doPost.jsと対応させること）
+var CT_COL_TIMESTAMP = 0;
+var CT_COL_APPLICANT = 1;
+var CT_COL_BRANCH = 2;
+var CT_COL_CATEGORY = 8;
+var CT_COL_STATUS = 56;
+var CT_SELLING_START = 11;   // 5件 x (記号,販売数,単価)
+var CT_INCREASE_START = 26;  // 5件 x (記号,サイクル,単価,数量)
+
 // 担当者マスタシート側（担当者一覧表）のレイアウト
 var STAFF_MASTER_FIRST_ROW = 3;   // 1〜2行目が見出し、3行目から担当者データ
 var STAFF_MASTER_COL_NAME = 1;    // A: 担当者名
@@ -171,6 +191,83 @@ function computeSalesRowTotals(row) {
   }
 
   return { count: count, amount: amount };
+}
+
+// campaign-tally側の1件分の「金額」を計算する（campaign-tallyのgas_doPost.js内
+// computeCampaignRowTotalsと同じ計算式。「増加・切替」のうち「切替」分は対象外＝
+// 増加の5商品欄にしかデータが無いため、この計算式では自然に0のままになる）。
+function computeCampaignTallyAmount_(row, category) {
+  var amount = 0;
+  if (category === "セリング") {
+    for (var i = 0; i < 5; i++) {
+      var base = CT_SELLING_START + i * 3;
+      var s = Number(row[base + 1]) || 0;
+      var p = Number(row[base + 2]) || 0;
+      amount += s * p;
+    }
+  } else if (category === "増加・切替") {
+    for (var j = 0; j < 5; j++) {
+      var b = CT_INCREASE_START + j * 4;
+      var cycle = Number(row[b + 1]) || 0;
+      var pr = Number(row[b + 2]) || 0;
+      var qty = Number(row[b + 3]) || 0;
+      if (cycle) amount += pr * (4 / cycle) * qty;
+    }
+  }
+  return amount;
+}
+
+// キャンペーン開催期間中（CAMPAIGN_ACTIVE_UNTIL以前）の、campaign-tally側の
+// 承認済みセリング・増加データを、sales-tallyの月次集計・日次集計バケットに加算する。
+// campaign-tallyのスプレッドシートを開けなかった場合は、集計全体を止めずに
+// スキップする（CAMPAIGN_TALLY_SHEET_URLの設定ミスやアクセス権限が無い場合など）。
+function addCampaignTallyTotals_(byStaffMonth, byBranchDay, staffBranch) {
+  var ctSheet;
+  try {
+    var ctSs = SpreadsheetApp.openByUrl(CAMPAIGN_TALLY_SHEET_URL);
+    var gidMatch = CAMPAIGN_TALLY_SHEET_URL.match(/[?&#]gid=(\d+)/);
+    var gid = gidMatch ? Number(gidMatch[1]) : 0;
+    var sheets = ctSs.getSheets();
+    for (var i = 0; i < sheets.length; i++) {
+      if (sheets[i].getSheetId() === gid) { ctSheet = sheets[i]; break; }
+    }
+    if (!ctSheet) ctSheet = ctSs.getSheets()[0];
+  } catch (e) {
+    Logger.log("campaign-tallyのスプレッドシートを開けませんでした: " + e.toString());
+    return;
+  }
+
+  function getBucket_(map, key) {
+    if (!map[key]) map[key] = emptyBucket_();
+    return map[key];
+  }
+
+  var ctRows = ctSheet.getDataRange().getValues().slice(1);
+  ctRows.forEach(function (row) {
+    if (String(row[CT_COL_STATUS]).trim() !== "承認済み") return;
+    var category = String(row[CT_COL_CATEGORY]).trim();
+    if (category !== "セリング" && category !== "増加・切替") return;
+
+    var parsed = parseTimestamp_(row[CT_COL_TIMESTAMP]);
+    if (!parsed) return;
+    if (parsed.day > CAMPAIGN_ACTIVE_UNTIL) return; // キャンペーン終了後の分は対象外
+
+    var staffName = String(row[CT_COL_APPLICANT]).trim();
+    if (!staffName) return;
+    var branch = String(row[CT_COL_BRANCH]).trim() || staffBranch[staffName] || "";
+    var amount = computeCampaignTallyAmount_(row, category);
+
+    var mb = getBucket_(byStaffMonth, staffName + "|" + parsed.month);
+    var db = branch ? getBucket_(byBranchDay, branch + "|" + parsed.day) : null;
+
+    if (category === "セリング") {
+      mb.sellingAmount += amount;
+      if (db) db.sellingAmount += amount;
+    } else {
+      mb.increaseAmount += amount;
+      if (db) db.increaseAmount += amount;
+    }
+  });
 }
 
 // "20261014" -> {month: "2026/10", day: "2026/10/14"}（CSVの日報確定年月日用）
@@ -279,6 +376,9 @@ function updateSalesSummary() {
   });
 
   // --- 集計用（セリング・上乗せ・理由あり今スト、承認済みのみ）を集計 ---
+  // 💡 セリング・増加は、キャンペーン開催期間中（CAMPAIGN_ACTIVE_UNTIL以前）は
+  //    campaign-tally側のデータを使うため、ここではカウントしない（二重カウント防止）。
+  //    理由あり今ストは期間を問わず常にここで集計する。
   var rawRows = rawSheet.getDataRange().getValues().slice(1);
   rawRows.forEach(function (row) {
     if (String(row[COL_STATUS]).trim() !== "承認済み") return;
@@ -289,21 +389,29 @@ function updateSalesSummary() {
     var parsed = parseTimestamp_(row[COL_TIMESTAMP]);
     if (!parsed) return;
     var totals = computeSalesRowTotals(row);
+    var withinCampaignPeriod = parsed.day <= CAMPAIGN_ACTIVE_UNTIL;
 
     var mb = getBucket_(byStaffMonth, staffName + "|" + parsed.month);
     var db = branch ? getBucket_(byBranchDay, branch + "|" + parsed.day) : null;
 
     if (category === "セリング") {
-      mb.sellingAmount += totals.amount;
-      if (db) db.sellingAmount += totals.amount;
+      if (!withinCampaignPeriod) {
+        mb.sellingAmount += totals.amount;
+        if (db) db.sellingAmount += totals.amount;
+      }
     } else if (category === "増加") {
-      mb.increaseAmount += totals.amount;
-      if (db) db.increaseAmount += totals.amount;
+      if (!withinCampaignPeriod) {
+        mb.increaseAmount += totals.amount;
+        if (db) db.increaseAmount += totals.amount;
+      }
     } else if (category === "理由あり今スト") {
       mb.stopManualAmount += totals.amount;
       if (db) db.stopManualAmount += totals.amount;
     }
   });
+
+  // --- キャンペーン開催期間中のセリング・増加は、campaign-tally側の承認済みデータから集計 ---
+  addCampaignTallyTotals_(byStaffMonth, byBranchDay, staffBranch);
 
   writeMonthlySummary_(monthlySheet, byStaffMonth, staffBranch);
   writeDailySummary_(dailySheet, byBranchDay);
