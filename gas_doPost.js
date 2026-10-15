@@ -212,6 +212,7 @@ function emptyBucket_() {
     sellingAmount: 0,    // 承認済みセリング金額
     increaseAmount: 0,   // 承認済み上乗せ（増加）金額
     stopManualAmount: 0, // 承認済み理由あり今スト金額（手入力分）
+    workingDaySet: {},   // 稼働日の集計用（日報入力確定年月日の重複排除。月次集計のみで使う）
   };
 }
 
@@ -267,6 +268,7 @@ function updateSalesSummary() {
     if (includeInPlanned) mb.plannedAmount += plannedAmount;
     mb.actualAmount += actualAmount;
     if (resultCode !== "2") mb.stopAmountCsv += (plannedAmount - actualAmount);
+    mb.workingDaySet[parsed.day] = true; // 稼働日＝日報入力確定年月日の重複排除カウント
 
     if (branch) {
       var db = getBucket_(byBranchDay, branch + "|" + parsed.day);
@@ -310,7 +312,7 @@ function updateSalesSummary() {
 }
 
 // 月次集計シート（2行目以降）を、担当者×年月の組み合わせごとに1行で丸ごと書き直す。
-// 列：年月, 担当者名, 拠点, 予定売上(調整後), セリング金額, 上乗せ(増加)金額,
+// 列：年月, 担当者名, 拠点, 稼働日, 予定売上(調整後), セリング金額, 上乗せ(増加)金額,
 //     今スト金額(調整後), 実績売上
 function writeMonthlySummary_(sheet, byStaffMonth, staffBranch) {
   var rows = Object.keys(byStaffMonth).map(function (key) {
@@ -318,9 +320,10 @@ function writeMonthlySummary_(sheet, byStaffMonth, staffBranch) {
     var name = parts[0], month = parts[1];
     var b = byStaffMonth[key];
     var branch = staffBranch[name] || "";
+    var workingDays = Object.keys(b.workingDaySet).length;
     var plannedAdjusted = b.plannedAmount - b.stopManualAmount;
     var stopAdjusted = Math.max(0, b.stopAmountCsv - b.stopManualAmount);
-    return [month, name, branch, plannedAdjusted, b.sellingAmount, b.increaseAmount, stopAdjusted, b.actualAmount];
+    return [month, name, branch, workingDays, plannedAdjusted, b.sellingAmount, b.increaseAmount, stopAdjusted, b.actualAmount];
   });
   rows.sort(function (a, b) {
     if (a[0] !== b[0]) return a[0] < b[0] ? -1 : 1;
@@ -328,8 +331,8 @@ function writeMonthlySummary_(sheet, byStaffMonth, staffBranch) {
   });
 
   var lastRow = sheet.getLastRow();
-  if (lastRow >= 2) sheet.getRange(2, 1, lastRow - 1, 8).clearContent();
-  if (rows.length > 0) sheet.getRange(2, 1, rows.length, 8).setValues(rows);
+  if (lastRow >= 2) sheet.getRange(2, 1, lastRow - 1, 9).clearContent();
+  if (rows.length > 0) sheet.getRange(2, 1, rows.length, 9).setValues(rows);
 }
 
 // 日次集計シート（2行目以降）を、拠点×日付の組み合わせごとに1行で丸ごと書き直す。
