@@ -75,14 +75,12 @@ function doPost(e) {
 }
 
 // ==========================================
-// 売上集計表・ランキング表の自動更新
+// 売上集計表の自動更新
 // 「集計用」シート（承認済みデータ）を担当者名ごとに集計し、
 // 「集計表」シートに手作業で用意された担当者一覧表（A列:担当者名, B列:拠点,
 // C列:エリア, D:セリング件数, E:セリング金額, F:増加件数, G:増加金額,
 // H:今スト件数, I:今スト金額, J:売上実績件数(CSV), K:売上実績金額(CSV)）の
-// D〜K列を埋める。同時に「ランキング表」シートに、セリング・増加・今ストそれぞれの
-// 金額ランキング（同率は同じ順位、次は同率人数分スキップ＝スプレッドシートのRANK関数
-// と同じ方式）を書き込む。
+// D〜K列を埋める。
 // A列（担当者名）・B列（拠点）・C列（エリア）・見出し行には一切触れない。
 // このスクリプトを売上集計用スプレッドシートに開いてから拡張機能＞Apps Scriptで
 // 開いた場合は、スプレッドシートのメニューバーに「📊 売上集計」→「集計を更新」が
@@ -94,7 +92,6 @@ function doPost(e) {
 var SALES_RAW_SHEET_NAME = "集計用";
 var SALES_IMPORT_SHEET_NAME = "売上データ";
 var SALES_SUMMARY_SHEET_NAME = "集計表";
-var SALES_RANKING_SHEET_NAME = "ランキング表";
 
 // 集計表シート側（担当者一覧表）のレイアウト
 var PERSON_TABLE_FIRST_ROW = 3;    // 1〜2行目が見出し、3行目から担当者データ
@@ -178,7 +175,7 @@ function updateSalesSummary() {
   var rows = data.slice(1); // 見出し行を除く
 
   // 担当者名（申請者）ごとに承認済みデータだけを集計する
-  // （「申請中」「破棄」はここで除外されるので、集計表・ランキング表どちらにも含まれない）。
+  // （「申請中」「破棄」はここで除外されるので、集計表には含まれない）。
   var byPerson = {}; // name -> {branch, sellingCount, sellingAmount, increaseCount, increaseAmount, stopCount, stopAmount}
 
   rows.forEach(function (row) {
@@ -229,11 +226,6 @@ function updateSalesSummary() {
 
   writeSalesPersonTable_(summarySheet, byPerson, bySalesPerson);
 
-  var rankingSheet = ss.getSheetByName(SALES_RANKING_SHEET_NAME);
-  if (rankingSheet) {
-    writeSalesRankingTable_(summarySheet, rankingSheet, byPerson);
-  }
-
   if (ui) ui.alert("集計表を更新しました（" + new Date().toLocaleString() + "）");
 }
 
@@ -266,54 +258,6 @@ function writeSalesPersonTable_(sheet, byPerson, bySalesPerson) {
   });
 
   sheet.getRange(PERSON_TABLE_FIRST_ROW, PERSON_TABLE_COL_SUMMARY_START, output.length, 8).setValues(output);
-}
-
-// ランキング表シートの各カテゴリブロックの開始列（1列目=A）
-var RANKING_FIRST_DATA_ROW = 4;
-var RANKING_BLOCK_SELLING_START_COL = 1;  // A列（セリング：順位/担当者名/拠点/件数/金額）
-var RANKING_BLOCK_INCREASE_START_COL = 7; // G列（増加：順位/担当者名/拠点/件数/金額）
-var RANKING_BLOCK_STOP_START_COL = 13;    // M列（今スト：順位/担当者名/拠点/件数/金額）
-
-function writeSalesRankingTable_(summarySheet, rankingSheet, byPerson) {
-  var lastRow = summarySheet.getLastRow();
-  if (lastRow < PERSON_TABLE_FIRST_ROW) return;
-
-  var numRows = lastRow - PERSON_TABLE_FIRST_ROW + 1;
-  var roster = summarySheet.getRange(PERSON_TABLE_FIRST_ROW, PERSON_TABLE_COL_NAME, numRows, 2).getValues(); // A:担当者名, B:拠点
-
-  var sellingRows = [], increaseRows = [], stopRows = [];
-  roster.forEach(function (r) {
-    var name = String(r[0]).trim();
-    if (!name) return;
-    var branch = String(r[1]).trim();
-    var p = byPerson[name] || {};
-    sellingRows.push({ name: name, branch: branch, count: p.sellingCount || 0, amount: p.sellingAmount || 0 });
-    increaseRows.push({ name: name, branch: branch, count: p.increaseCount || 0, amount: p.increaseAmount || 0 });
-    stopRows.push({ name: name, branch: branch, count: p.stopCount || 0, amount: p.stopAmount || 0 });
-  });
-
-  writeRankingBlock_(rankingSheet, RANKING_BLOCK_SELLING_START_COL, sellingRows);
-  writeRankingBlock_(rankingSheet, RANKING_BLOCK_INCREASE_START_COL, increaseRows);
-  writeRankingBlock_(rankingSheet, RANKING_BLOCK_STOP_START_COL, stopRows);
-}
-
-// 金額の降順で順位付けする（同率は同じ順位、次の順位は同率人数分スキップ＝
-// スプレッドシートのRANK関数と同じ方式）。
-function writeRankingBlock_(sheet, startCol, rows) {
-  var sorted = rows.slice().sort(function (a, b) { return b.amount - a.amount; });
-
-  var output = [];
-  var lastRank = 0, lastValue = null;
-  for (var i = 0; i < sorted.length; i++) {
-    var r = sorted[i];
-    var rank = (lastValue !== null && r.amount === lastValue) ? lastRank : i + 1;
-    lastRank = rank;
-    lastValue = r.amount;
-    output.push([rank, r.name, r.branch, r.count, r.amount]);
-  }
-
-  if (output.length === 0) return;
-  sheet.getRange(RANKING_FIRST_DATA_ROW, startCol, output.length, 5).setValues(output);
 }
 
 // メニューが表示されない（スクリプトがスプレッドシートに紐付いていない）場合はこれを

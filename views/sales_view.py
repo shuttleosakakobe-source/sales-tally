@@ -1,7 +1,6 @@
 """売上集計アプリのメイン画面。
 顧客コード検索、上乗せ活動（セリング／増加／理由あり今スト）の入力フォーム、
-管理職チェック（承認・差戻し）、過去データの修正・破棄、CSV一括インポート、
-集計・ランキング表示を実装している。"""
+管理職チェック（承認・差戻し）、過去データの修正・破棄、CSV一括インポートを実装している。"""
 import streamlit as st
 import pandas as pd
 from datetime import date, datetime, timedelta
@@ -533,82 +532,6 @@ def _csv_import_section():
             st.error(f"取り込みに失敗しました: {res.get('message')}")
 
 
-def _render_ranking_table(ranked):
-    if ranked.empty:
-        st.caption("データがありません。")
-        return
-    display_rows = []
-    for rank, (_, r) in enumerate(ranked.iterrows(), start=1):
-        display_rows.append({
-            "順位": rank,
-            "氏名": r["_name"],
-            "件数": int(r["count"]),
-            "金額": f"{_fmt_amount(r['amount']) or 0}円",
-        })
-    st.table(pd.DataFrame(display_rows).set_index("順位"))
-
-
-def _ranking_section():
-    """セリング・増加・理由あり今ストそれぞれの金額ランキング（TOP5）を表示する。
-    全拠点・承認済みデータのみが対象。"""
-    st.write("**🏆 上乗せ活動ランキング**")
-    st.caption("全拠点の承認済みデータが対象です。")
-
-    if st.button("🔄 最新のデータを読み込む", key="sl_rank_reload"):
-        read_csv_cached.clear()
-
-    try:
-        df = read_csv_cached(SALES_SHEET_CSV, header=0)
-    except Exception as e:
-        st.error(f"データ取得エラー: {e}")
-        return
-
-    if df.empty or len(df.columns) <= STATUS_COL:
-        st.info("データがありません。")
-        return
-
-    approved_df = df[df.iloc[:, STATUS_COL].astype(str).str.strip() == "承認済み"].copy()
-    if approved_df.empty:
-        st.info("承認済みデータがまだありません。")
-        return
-    approved_df["_name"] = approved_df.iloc[:, 1].astype(str).str.strip()
-
-    def _category_totals(sub_df, start_col, item_cols, qty_offset, price_offset):
-        counts = pd.Series(0.0, index=sub_df.index)
-        amounts = pd.Series(0.0, index=sub_df.index)
-        for i in range(5):
-            base = start_col + i * item_cols
-            qty = pd.to_numeric(sub_df.iloc[:, base + qty_offset], errors="coerce").fillna(0)
-            price = pd.to_numeric(sub_df.iloc[:, base + price_offset], errors="coerce").fillna(0)
-            counts += qty
-            amounts += qty * price
-        return counts, amounts
-
-    for label, start_col, item_cols, qty_offset, price_offset, category_name in [
-        ("セリング", SELLING_START, 3, 1, 2, "セリング"),
-        ("増加", INCREASE_START, 4, 3, 2, "増加"),
-        ("理由あり今スト", STOP_START, 3, 1, 2, "理由あり今スト"),
-    ]:
-        cat_df = approved_df[approved_df.iloc[:, 8].astype(str).str.strip() == category_name].copy()
-        st.write(f"**🥇 {label} TOP5**")
-        if cat_df.empty:
-            st.caption("データがありません。")
-            st.write("---")
-            continue
-        counts, amounts = _category_totals(cat_df, start_col, item_cols, qty_offset, price_offset)
-        cat_df["_count"] = counts
-        cat_df["_amount"] = amounts
-        ranked = (
-            cat_df.groupby("_name")
-            .agg(count=("_count", "sum"), amount=("_amount", "sum"))
-            .reset_index()
-            .sort_values("amount", ascending=False)
-            .head(5)
-        )
-        _render_ranking_table(ranked)
-        st.write("---")
-
-
 def sales_screen():
     # 💡 disabled（読み取り専用）入力欄の文字が薄くて読みにくいのを解消
     st.markdown("""
@@ -651,7 +574,6 @@ def sales_screen():
     tab_labels += ["📋 自分の入力履歴"]
     if role in CSV_IMPORT_ROLES:
         tab_labels += ["📥 CSV一括インポート"]
-    tab_labels += ["🏆 ランキング"]
 
     tabs = st.tabs(tab_labels)
     tab_map = dict(zip(tab_labels, tabs))
@@ -674,6 +596,3 @@ def sales_screen():
     if "📥 CSV一括インポート" in tab_map:
         with tab_map["📥 CSV一括インポート"]:
             _csv_import_section()
-
-    with tab_map["🏆 ランキング"]:
-        _ranking_section()
