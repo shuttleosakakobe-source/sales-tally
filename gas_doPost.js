@@ -119,6 +119,7 @@ var CT_COL_APPLICANT = 1;
 var CT_COL_BRANCH = 2;
 var CT_COL_CATEGORY = 8;
 var CT_COL_STATUS = 56;
+var CT_COL_KB_SALES = 9, CT_COL_KB_PRICE = 10; // きれいBOX（販売数・単価）。セリング金額に合算する
 var CT_SELLING_START = 11;   // 5件 x (記号,販売数,単価)
 var CT_INCREASE_START = 26;  // 5件 x (記号,サイクル,単価,数量)
 
@@ -196,9 +197,14 @@ function computeSalesRowTotals(row) {
 // campaign-tally側の1件分の「金額」を計算する（campaign-tallyのgas_doPost.js内
 // computeCampaignRowTotalsと同じ計算式。「増加・切替」のうち「切替」分は対象外＝
 // 増加の5商品欄にしかデータが無いため、この計算式では自然に0のままになる）。
+// 💡 きれいBOXは、sales-tally側に対応するカテゴリが無いため「セリング金額」に合算する。
 function computeCampaignTallyAmount_(row, category) {
   var amount = 0;
-  if (category === "セリング") {
+  if (category === "きれいBOX") {
+    var kbSales = Number(row[CT_COL_KB_SALES]) || 0;
+    var kbPrice = Number(row[CT_COL_KB_PRICE]) || 0;
+    amount = kbSales * kbPrice;
+  } else if (category === "セリング") {
     for (var i = 0; i < 5; i++) {
       var base = CT_SELLING_START + i * 3;
       var s = Number(row[base + 1]) || 0;
@@ -246,7 +252,7 @@ function addCampaignTallyTotals_(byStaffMonth, byBranchDay, staffBranch) {
   ctRows.forEach(function (row) {
     if (String(row[CT_COL_STATUS]).trim() !== "承認済み") return;
     var category = String(row[CT_COL_CATEGORY]).trim();
-    if (category !== "セリング" && category !== "増加・切替") return;
+    if (category !== "きれいBOX" && category !== "セリング" && category !== "増加・切替") return;
 
     var parsed = parseTimestamp_(row[CT_COL_TIMESTAMP]);
     if (!parsed) return;
@@ -260,7 +266,8 @@ function addCampaignTallyTotals_(byStaffMonth, byBranchDay, staffBranch) {
     var mb = getBucket_(byStaffMonth, staffName + "|" + parsed.month);
     var db = branch ? getBucket_(byBranchDay, branch + "|" + parsed.day) : null;
 
-    if (category === "セリング") {
+    // 💡 きれいBOXはsales-tally側に対応カテゴリが無いため、セリング金額に合算する。
+    if (category === "セリング" || category === "きれいBOX") {
       mb.sellingAmount += amount;
       if (db) db.sellingAmount += amount;
     } else {
