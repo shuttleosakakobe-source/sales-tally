@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta
 from views.common import (
     lookup_customer, post_to_gas, read_csv_cached, get_current_role,
     BRANCH_CUSTOMER_CSV, SALES_SHEET_URL, SALES_SHEET_CSV,
-    SALES_IMPORT_SHEET_URL, JST,
+    SALES_IMPORT_SHEET_URL, SALES_IMPORT_SHEET_CSV, JST,
 )
 
 CATEGORIES = ["セリング", "増加", "理由あり今スト"]
@@ -270,9 +270,54 @@ def _render_entry_readonly(row, key_prefix):
         st.text_input("FAX有無", value=_val(row, FAX_COL), disabled=True, key=f"{key_prefix}_st_fax")
 
 
+def _load_csv_match_keys():
+    """売上データ（CSV取込）シートから、(顧客コード, 商品記号, 実績金額) の組み合わせを
+    集合として読み込む。セリング・理由あり今ストの申請内容がCSV実績データに実在するか
+    どうかの突き合わせチェックに使う。実績金額は数量×単価で四捨五入して比較する
+    （端数・浮動小数点誤差を吸収するため）。"""
+    try:
+        df = read_csv_cached(SALES_IMPORT_SHEET_CSV, header=0)
+    except Exception:
+        return None
+    if df.empty or len(df.columns) < 11:
+        return set()
+
+    cust_code = df.iloc[:, 3].astype(str).str.strip()
+    product_code = df.iloc[:, 5].astype(str).str.strip()
+    qty = pd.to_numeric(df.iloc[:, 9], errors="coerce").fillna(0)
+    price = pd.to_numeric(df.iloc[:, 10], errors="coerce").fillna(0)
+    amount = (qty * price).round().astype(int)
+
+    return set(zip(cust_code, product_code, amount))
+
+
+def _check_csv_mismatch(row, category, match_keys):
+    """この申請（セリング／理由あり今スト）の商品欄それぞれについて、同じ
+    （顧客コード・商品記号・金額）の組み合わせがCSV実績データに存在するかを確認し、
+    見つからなかった商品の一覧を返す（空リスト＝すべて一致）。"""
+    if match_keys is None or category not in ("セリング", "理由あり今スト"):
+        return None
+
+    cust_code = _val(row, 4).strip()
+    start_col = SELLING_START if category == "セリング" else STOP_START
+    mismatches = []
+    for i in range(5):
+        base = start_col + i * 3
+        code = _val(row, base).strip()
+        if not code:
+            continue
+        qty = _to_float(_val(row, base + 1))
+        price = _to_float(_val(row, base + 2))
+        amount = round(qty * price)
+        if (cust_code, code, amount) not in match_keys:
+            mismatches.append(f"{code}（{amount:,}円）")
+    return mismatches
+
+
 def _manager_check_section():
     st.write("**🔍 管理職チェック**")
     st.caption("申請中の上乗せ活動実績を確認し、承認または破棄できます。")
+    st.caption("セリング・理由あり今ストは、売上データ（CSV取込）に同じ顧客コード・商品記号・金額の実績が無い場合、⚠️アラートを表示します。")
 
     if st.button("🔄 最新の申請を読み込む", key="sl_check_reload"):
         read_csv_cached.clear()
@@ -300,6 +345,8 @@ def _manager_check_section():
 
     st.warning(f"承認待ち: **{len(pending_df)} 件**")
 
+    match_keys = _load_csv_match_keys()
+
     for idx, row in pending_df.iloc[::-1].iterrows():
         row_id = idx + 2
         applicant = _val(row, 1)
@@ -307,7 +354,18 @@ def _manager_check_section():
         category = _val(row, 8)
         timestamp = _val(row, 0)
 
-        with st.expander(f"⏳ 【{category}】{cust_name} | 申請者: {applicant} | {timestamp}"):
+        mismatches = _check_csv_mismatch(row, category, match_keys)
+        alert_mark = "⚠️ " if mismatches else ""
+
+        with st.expander(f"{alert_mark}⏳ 【{category}】{cust_name} | 申請者: {applicant} | {timestamp}"):
+            if mismatches is None and category in ("セリング", "理由あり今スト"):
+                st.caption("（売上データの取得に失敗したため、突き合わせチェックは実施できませんでした）")
+            elif mismatches:
+                st.warning(
+                    "⚠️ 売上データ（CSV）に同じ顧客コード・商品記号・金額の実績が見つかりませんでした: "
+                    + "、".join(mismatches)
+                )
+
             _render_entry_readonly(row, key_prefix=f"chk_{row_id}")
 
             comment = st.text_input("備考（破棄する場合は任意で理由を記入できます）", key=f"chk_reason_{row_id}")

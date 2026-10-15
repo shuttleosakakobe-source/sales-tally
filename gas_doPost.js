@@ -75,13 +75,20 @@ function doPost(e) {
 }
 
 // ==========================================
-// 売上集計表の自動更新
-// 「集計用」シート（承認済みデータ）を担当者名ごとに集計し、
-// 「集計表」シートに手作業で用意された担当者一覧表（A列:担当者名, B列:拠点,
-// C列:エリア, D:セリング件数, E:セリング金額, F:増加件数, G:増加金額,
-// H:今スト件数, I:今スト金額, J:売上実績件数(CSV), K:売上実績金額(CSV)）の
-// D〜K列を埋める。
-// A列（担当者名）・B列（拠点）・C列（エリア）・見出し行には一切触れない。
+// 月次集計（担当者ごと）・日次集計（拠点ごと）の自動更新
+//
+// 集計の考え方：
+// - 月次集計＝担当者ごと、日次集計＝拠点ごと（拠点は「担当者マスタ」シートの
+//   A列:担当者名/B列:拠点から引く。集計用シート側は申請者本人が入力した拠点列を優先）。
+// - 予定売上・実績売上・今スト金額（CSVベース）は「売上データ」シート（CSV取込）から、
+//   セリング・上乗せ（増加）・理由あり今スト金額は「集計用」シート（承認済みのみ）から
+//   それぞれ集計する。
+// - 今スト金額（CSVベース）＝伝票納品結果種別が「2」（持ち越し中・未確定）の行を除いた、
+//   (予定数量×予定単価 − 実績数量×実績単価) の合計。
+// - 理由あり今スト（スタッフが手入力・承認済み）の金額は、予定売上・今スト金額の
+//   両方からマイナスする（予定売上＝より実態に近い予定に調整／今スト金額＝
+//   まだ理由が説明されていない未解明の差分だけが残るようにする）。
+//
 // このスクリプトを売上集計用スプレッドシートに開いてから拡張機能＞Apps Scriptで
 // 開いた場合は、スプレッドシートのメニューバーに「📊 売上集計」→「集計を更新」が
 // 追加される（onOpen）。メニューが出ない場合は、Apps Scriptエディタの関数選択で
@@ -91,26 +98,33 @@ function doPost(e) {
 
 var SALES_RAW_SHEET_NAME = "集計用";
 var SALES_IMPORT_SHEET_NAME = "売上データ";
-var SALES_SUMMARY_SHEET_NAME = "集計表";
+var STAFF_MASTER_SHEET_NAME = "担当者マスタ";
+var MONTHLY_SHEET_NAME = "月次集計";
+var DAILY_SHEET_NAME = "日次集計";
 
-// 集計表シート側（担当者一覧表）のレイアウト
-var PERSON_TABLE_FIRST_ROW = 3;    // 1〜2行目が見出し、3行目から担当者データ
-var PERSON_TABLE_COL_NAME = 1;     // A: 担当者名
-var PERSON_TABLE_COL_SUMMARY_START = 4; // D: セリング件数（D〜Kの8列分を書き込む）
+// 担当者マスタシート側（担当者一覧表）のレイアウト
+var STAFF_MASTER_FIRST_ROW = 3;   // 1〜2行目が見出し、3行目から担当者データ
+var STAFF_MASTER_COL_NAME = 1;    // A: 担当者名
+var STAFF_MASTER_COL_BRANCH = 2;  // B: 拠点
 
 // 集計用シートの列（0始まり、views/sales_view.py の full_row と対応させること）
-var COL_BRANCH = 2;
-var COL_AREA = 3;
+var COL_TIMESTAMP = 0;
 var COL_APPLICANT = 1;
+var COL_BRANCH = 2;
 var COL_CATEGORY = 8;
 var COL_STATUS = 61;
 var SELLING_START = 9;    // 5件 x (記号,販売数,単価)
 var INCREASE_START = 24;  // 5件 x (記号,サイクル,単価,数量)
 var STOP_START = 44;      // 5件 x (記号,数量,単価)
 
-// CSV取り込み後の売上データシート側の列（0始まり）
-var IMPORT_COL_QTY_ACTUAL = 9;   // 納品実績数量
-var IMPORT_COL_PRICE_ACTUAL = 10; // 売上実績税抜単価
+// 売上データシート（CSV取込）側の列（0始まり、CSVの列順と対応させること）
+var IMPORT_COL_REPORT_DATE = 0;    // 日報入力確定年月日（例: "20261014"）
+var IMPORT_COL_STAFF_NAME = 2;     // 担当者名
+var IMPORT_COL_RESULT_CODE = 6;    // 伝票納品結果種別
+var IMPORT_COL_QTY_PLANNED = 7;    // 納品予定数量
+var IMPORT_COL_PRICE_PLANNED = 8;  // 売上予定税抜単価
+var IMPORT_COL_QTY_ACTUAL = 9;     // 納品実績数量
+var IMPORT_COL_PRICE_ACTUAL = 10;  // 売上実績税抜単価
 
 function onOpen() {
   SpreadsheetApp.getUi()
@@ -158,106 +172,176 @@ function computeSalesRowTotals(row) {
   return { count: count, amount: amount };
 }
 
+// "20261014" -> {month: "2026/10", day: "2026/10/14"}（CSVの日報確定年月日用）
+function parseReportDate_(dateStr) {
+  var s = String(dateStr).trim();
+  if (s.length !== 8) return null;
+  var y = s.substring(0, 4), m = s.substring(4, 6), d = s.substring(6, 8);
+  return { month: y + "/" + m, day: y + "/" + m + "/" + d };
+}
+
+// "2026/10/14 09:00:00" -> {month: "2026/10", day: "2026/10/14"}（申請のタイムスタンプ用）
+function parseTimestamp_(ts) {
+  var s = String(ts).trim();
+  if (s.length < 10) return null;
+  return { month: s.substring(0, 7), day: s.substring(0, 10) };
+}
+
+function loadStaffBranchMap_(ss) {
+  var sheet = ss.getSheetByName(STAFF_MASTER_SHEET_NAME);
+  var map = {};
+  if (!sheet) return map;
+  var lastRow = sheet.getLastRow();
+  if (lastRow < STAFF_MASTER_FIRST_ROW) return map;
+  var numRows = lastRow - STAFF_MASTER_FIRST_ROW + 1;
+  var data = sheet.getRange(STAFF_MASTER_FIRST_ROW, STAFF_MASTER_COL_NAME, numRows, 2).getValues();
+  data.forEach(function (r) {
+    var name = String(r[0]).trim();
+    var branch = String(r[1]).trim();
+    if (name) map[name] = branch;
+  });
+  return map;
+}
+
+function emptyBucket_() {
+  return {
+    plannedAmount: 0,    // CSVの予定売上（数量×単価の合計）
+    actualAmount: 0,     // CSVの実績売上（数量×単価の合計）
+    stopAmountCsv: 0,    // CSVベースの今スト金額（コード2を除く、予定-実績の合計）
+    sellingAmount: 0,    // 承認済みセリング金額
+    increaseAmount: 0,   // 承認済み上乗せ（増加）金額
+    stopManualAmount: 0, // 承認済み理由あり今スト金額（手入力分）
+  };
+}
+
 function updateSalesSummary() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var rawSheet = ss.getSheetByName(SALES_RAW_SHEET_NAME);
-  var summarySheet = ss.getSheetByName(SALES_SUMMARY_SHEET_NAME);
+  var importSheet = ss.getSheetByName(SALES_IMPORT_SHEET_NAME);
+  var monthlySheet = ss.getSheetByName(MONTHLY_SHEET_NAME);
+  var dailySheet = ss.getSheetByName(DAILY_SHEET_NAME);
   var ui;
   try { ui = SpreadsheetApp.getUi(); } catch (e) { ui = null; }
 
-  if (!rawSheet || !summarySheet) {
-    var msg = "シートが見つかりません（" + SALES_RAW_SHEET_NAME + " / " + SALES_SUMMARY_SHEET_NAME + "）。";
+  if (!rawSheet || !importSheet || !monthlySheet || !dailySheet) {
+    var msg = "シートが見つかりません（" + SALES_RAW_SHEET_NAME + " / " + SALES_IMPORT_SHEET_NAME +
+      " / " + MONTHLY_SHEET_NAME + " / " + DAILY_SHEET_NAME + "）。";
     if (ui) ui.alert(msg);
     return;
   }
 
-  var data = rawSheet.getDataRange().getValues();
-  var rows = data.slice(1); // 見出し行を除く
+  var staffBranch = loadStaffBranchMap_(ss);
 
-  // 担当者名（申請者）ごとに承認済みデータだけを集計する
-  // （「申請中」「破棄」はここで除外されるので、集計表には含まれない）。
-  var byPerson = {}; // name -> {branch, sellingCount, sellingAmount, increaseCount, increaseAmount, stopCount, stopAmount}
+  var byStaffMonth = {}; // "担当者|年月" -> バケット
+  var byBranchDay = {};  // "拠点|日付" -> バケット
 
-  rows.forEach(function (row) {
-    if (String(row[COL_STATUS]).trim() !== "承認済み") return;
+  function getBucket_(map, key) {
+    if (!map[key]) map[key] = emptyBucket_();
+    return map[key];
+  }
 
-    var name = String(row[COL_APPLICANT]).trim();
-    if (!name) return;
-    var branch = String(row[COL_BRANCH]).trim();
-    var category = String(row[COL_CATEGORY]).trim();
-    var totals = computeSalesRowTotals(row);
+  // --- 売上データ（CSV取込）を集計：予定売上・実績売上・今スト金額（CSVベース）の元になる ---
+  var importRows = importSheet.getDataRange().getValues().slice(1);
+  importRows.forEach(function (row) {
+    var staffName = String(row[IMPORT_COL_STAFF_NAME]).trim();
+    if (!staffName) return;
+    var parsed = parseReportDate_(row[IMPORT_COL_REPORT_DATE]);
+    if (!parsed) return;
+    var branch = staffBranch[staffName] || "";
 
-    if (!byPerson[name]) {
-      byPerson[name] = {
-        branch: "", sellingCount: 0, sellingAmount: 0,
-        increaseCount: 0, increaseAmount: 0, stopCount: 0, stopAmount: 0,
-      };
-    }
-    if (branch) byPerson[name].branch = branch;
+    var plannedAmount = (Number(row[IMPORT_COL_QTY_PLANNED]) || 0) * (Number(row[IMPORT_COL_PRICE_PLANNED]) || 0);
+    var actualAmount = (Number(row[IMPORT_COL_QTY_ACTUAL]) || 0) * (Number(row[IMPORT_COL_PRICE_ACTUAL]) || 0);
+    var resultCode = String(row[IMPORT_COL_RESULT_CODE]).trim();
 
-    if (category === "セリング") {
-      byPerson[name].sellingCount += totals.count;
-      byPerson[name].sellingAmount += totals.amount;
-    } else if (category === "増加") {
-      byPerson[name].increaseCount += totals.count;
-      byPerson[name].increaseAmount += totals.amount;
-    } else if (category === "理由あり今スト") {
-      byPerson[name].stopCount += totals.count;
-      byPerson[name].stopAmount += totals.amount;
+    var mb = getBucket_(byStaffMonth, staffName + "|" + parsed.month);
+    mb.plannedAmount += plannedAmount;
+    mb.actualAmount += actualAmount;
+    if (resultCode !== "2") mb.stopAmountCsv += (plannedAmount - actualAmount);
+
+    if (branch) {
+      var db = getBucket_(byBranchDay, branch + "|" + parsed.day);
+      db.plannedAmount += plannedAmount;
+      db.actualAmount += actualAmount;
+      if (resultCode !== "2") db.stopAmountCsv += (plannedAmount - actualAmount);
     }
   });
 
-  // 売上データシート（CSV取り込み）の実績も担当者ごとに集計する（承認フロー無し＝全件対象）。
-  var importSheet = ss.getSheetByName(SALES_IMPORT_SHEET_NAME);
-  var bySalesPerson = {}; // name -> {count, amount}
-  if (importSheet) {
-    var importData = importSheet.getDataRange().getValues();
-    var importRows = importData.slice(1);
-    importRows.forEach(function (row) {
-      var name = String(row[COL_APPLICANT]).trim(); // 担当者名列はCOL_APPLICANTと同じ列位置(1)
-      if (!name) return;
-      var qty = Number(row[IMPORT_COL_QTY_ACTUAL]) || 0;
-      var price = Number(row[IMPORT_COL_PRICE_ACTUAL]) || 0;
-      if (!bySalesPerson[name]) bySalesPerson[name] = { count: 0, amount: 0 };
-      bySalesPerson[name].count += qty;
-      bySalesPerson[name].amount += qty * price;
-    });
-  }
+  // --- 集計用（セリング・上乗せ・理由あり今スト、承認済みのみ）を集計 ---
+  var rawRows = rawSheet.getDataRange().getValues().slice(1);
+  rawRows.forEach(function (row) {
+    if (String(row[COL_STATUS]).trim() !== "承認済み") return;
+    var staffName = String(row[COL_APPLICANT]).trim();
+    if (!staffName) return;
+    var branch = String(row[COL_BRANCH]).trim() || staffBranch[staffName] || "";
+    var category = String(row[COL_CATEGORY]).trim();
+    var parsed = parseTimestamp_(row[COL_TIMESTAMP]);
+    if (!parsed) return;
+    var totals = computeSalesRowTotals(row);
 
-  writeSalesPersonTable_(summarySheet, byPerson, bySalesPerson);
+    var mb = getBucket_(byStaffMonth, staffName + "|" + parsed.month);
+    var db = branch ? getBucket_(byBranchDay, branch + "|" + parsed.day) : null;
+
+    if (category === "セリング") {
+      mb.sellingAmount += totals.amount;
+      if (db) db.sellingAmount += totals.amount;
+    } else if (category === "増加") {
+      mb.increaseAmount += totals.amount;
+      if (db) db.increaseAmount += totals.amount;
+    } else if (category === "理由あり今スト") {
+      mb.stopManualAmount += totals.amount;
+      if (db) db.stopManualAmount += totals.amount;
+    }
+  });
+
+  writeMonthlySummary_(monthlySheet, byStaffMonth, staffBranch);
+  writeDailySummary_(dailySheet, byBranchDay);
 
   if (ui) ui.alert("集計表を更新しました（" + new Date().toLocaleString() + "）");
 }
 
-// 集計表シートに手作業で用意された担当者一覧（A列:担当者名, B列:拠点）に沿って、
-// D列（セリング件数）〜K列（売上実績金額(CSV)）を担当者名で突き合わせて書き込む。
-// A列・B列・C列（エリア。あとで手入力するため触らない）・見出し行には一切触れない。
-// 該当データが無い担当者は各項目とも空欄にする（0円は表示しない、入力画面の金額表示と同じ扱い）。
-function writeSalesPersonTable_(sheet, byPerson, bySalesPerson) {
-  var lastRow = sheet.getLastRow();
-  if (lastRow < PERSON_TABLE_FIRST_ROW) return;
-
-  var numRows = lastRow - PERSON_TABLE_FIRST_ROW + 1;
-  var names = sheet.getRange(PERSON_TABLE_FIRST_ROW, PERSON_TABLE_COL_NAME, numRows, 1).getValues();
-
-  var output = names.map(function (r) {
-    var name = String(r[0]).trim();
-    if (!name) return ["", "", "", "", "", "", "", ""];
-    var p = byPerson[name];
-    var s = bySalesPerson[name];
-    return [
-      p ? (p.sellingCount || "") : "",
-      p ? (p.sellingAmount || "") : "",
-      p ? (p.increaseCount || "") : "",
-      p ? (p.increaseAmount || "") : "",
-      p ? (p.stopCount || "") : "",
-      p ? (p.stopAmount || "") : "",
-      s ? (s.count || "") : "",
-      s ? (s.amount || "") : "",
-    ];
+// 月次集計シート（2行目以降）を、担当者×年月の組み合わせごとに1行で丸ごと書き直す。
+// 列：年月, 担当者名, 拠点, 予定売上(調整後), セリング金額, 上乗せ(増加)金額,
+//     今スト金額(調整後), 実績売上
+function writeMonthlySummary_(sheet, byStaffMonth, staffBranch) {
+  var rows = Object.keys(byStaffMonth).map(function (key) {
+    var parts = key.split("|");
+    var name = parts[0], month = parts[1];
+    var b = byStaffMonth[key];
+    var branch = staffBranch[name] || "";
+    var plannedAdjusted = b.plannedAmount - b.stopManualAmount;
+    var stopAdjusted = b.stopAmountCsv - b.stopManualAmount;
+    return [month, name, branch, plannedAdjusted, b.sellingAmount, b.increaseAmount, stopAdjusted, b.actualAmount];
+  });
+  rows.sort(function (a, b) {
+    if (a[0] !== b[0]) return a[0] < b[0] ? -1 : 1;
+    return a[1] < b[1] ? -1 : (a[1] > b[1] ? 1 : 0);
   });
 
-  sheet.getRange(PERSON_TABLE_FIRST_ROW, PERSON_TABLE_COL_SUMMARY_START, output.length, 8).setValues(output);
+  var lastRow = sheet.getLastRow();
+  if (lastRow >= 2) sheet.getRange(2, 1, lastRow - 1, 8).clearContent();
+  if (rows.length > 0) sheet.getRange(2, 1, rows.length, 8).setValues(rows);
+}
+
+// 日次集計シート（2行目以降）を、拠点×日付の組み合わせごとに1行で丸ごと書き直す。
+// 列：日付, 拠点, 予定売上(調整後), セリング金額, 上乗せ(増加)金額,
+//     今スト金額(調整後), 実績売上
+function writeDailySummary_(sheet, byBranchDay) {
+  var rows = Object.keys(byBranchDay).map(function (key) {
+    var parts = key.split("|");
+    var branch = parts[0], day = parts[1];
+    var b = byBranchDay[key];
+    var plannedAdjusted = b.plannedAmount - b.stopManualAmount;
+    var stopAdjusted = b.stopAmountCsv - b.stopManualAmount;
+    return [day, branch, plannedAdjusted, b.sellingAmount, b.increaseAmount, stopAdjusted, b.actualAmount];
+  });
+  rows.sort(function (a, b) {
+    if (a[0] !== b[0]) return a[0] < b[0] ? -1 : 1;
+    return a[1] < b[1] ? -1 : (a[1] > b[1] ? 1 : 0);
+  });
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow >= 2) sheet.getRange(2, 1, lastRow - 1, 7).clearContent();
+  if (rows.length > 0) sheet.getRange(2, 1, rows.length, 7).setValues(rows);
 }
 
 // メニューが表示されない（スクリプトがスプレッドシートに紐付いていない）場合はこれを
